@@ -12,7 +12,10 @@ This project uses GitHub Actions for continuous integration and deployment. The 
 - Pull requests to `main` or `develop` branches
 - Direct pushes to `main` or `develop` branches
 
-**Note**: NPM caching is currently disabled because `package-lock.json` files don't exist yet. Once you run `npm install` in each directory and commit the lock files, you can re-enable caching by adding `cache: 'npm'` to the `setup-node` steps.
+**Dependency Installation**:
+- Currently uses `npm install` (works without lock files)
+- Once `package-lock.json` files are committed, update to `npm ci` for faster, deterministic installs
+- Enable caching by adding `cache: 'npm'` to `setup-node` steps after lock files exist
 
 **Jobs**:
 
@@ -290,9 +293,10 @@ Production deployments send Slack notifications to configured webhook:
 
 ### CI Pipeline Issues
 
-**Problem**: "Dependencies lock file is not found" or cache-related errors
+**Problem**: "The npm ci command can only install with an existing package-lock.json"
 
-**Solution**: The workflow currently has caching disabled. To enable faster builds, generate and commit `package-lock.json` files:
+**Solution**: The workflow now uses `npm install` instead of `npm ci` to work without lock files. Once you add lock files, optimize the workflow:
+
 ```bash
 # Generate package-lock.json files
 cd backend && npm install
@@ -306,18 +310,13 @@ cd ../admin-mfe && npm install
 
 # Commit all lock files
 git add **/package-lock.json
-git commit -m "Add package-lock.json files for dependency caching"
+git commit -m "Add package-lock.json files"
 git push
 ```
 
-Then update `.github/workflows/ci.yml` to re-enable caching:
-```yaml
-- name: Setup Node.js
-  uses: actions/setup-node@v4
-  with:
-    node-version: ${{ env.NODE_VERSION }}
-    cache: 'npm'  # Add this line back
-```
+Then optimize `.github/workflows/ci.yml` for production:
+1. Change `npm install` → `npm ci` (faster, deterministic)
+2. Add `cache: 'npm'` to all `setup-node@v4` steps (2-5x faster builds)
 
 **Problem**: Tests failing in CI but passing locally
 
