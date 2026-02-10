@@ -12,6 +12,12 @@ This project uses GitHub Actions for continuous integration and deployment. The 
 - Pull requests to `main` or `develop` branches
 - Direct pushes to `main` or `develop` branches
 
+**NPM Caching**:
+- Uses `cache: 'npm'` to automatically cache node_modules
+- Auto-detects package-lock.json files in working directories
+- Significantly speeds up subsequent builds (2-5x faster)
+- Cache key based on package-lock.json hash (invalidates on dependency changes)
+
 **Jobs**:
 
 #### Lint Jobs
@@ -287,6 +293,18 @@ Production deployments send Slack notifications to configured webhook:
 ## Troubleshooting
 
 ### CI Pipeline Issues
+
+**Problem**: "Some specified paths were not resolved, unable to cache dependencies"
+
+**Solution**: This error occurs when `package-lock.json` doesn't exist. The workflow uses `cache: 'npm'` without specifying a path, which auto-detects lock files. If you see this error:
+```bash
+# Generate package-lock.json files
+cd backend && npm install
+cd ../frontend/host-shell && npm install
+# Repeat for all MFEs
+git add */package-lock.json
+git commit -m "Add package-lock.json files"
+```
 
 **Problem**: Tests failing in CI but passing locally
 

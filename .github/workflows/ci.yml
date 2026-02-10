@@ -24,7 +24,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
       
       - name: Install dependencies
         working-directory: ./backend
@@ -54,7 +53,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: frontend/${{ matrix.mfe }}/package-lock.json
       
       - name: Install dependencies
         working-directory: ./frontend/${{ matrix.mfe }}
@@ -102,7 +100,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
       
       - name: Install dependencies
         working-directory: ./backend
@@ -177,7 +174,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: frontend/${{ matrix.mfe }}/package-lock.json
       
       - name: Install dependencies
         working-directory: ./frontend/${{ matrix.mfe }}
@@ -208,7 +204,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
       
       - name: Install dependencies
         working-directory: ./backend
@@ -242,7 +237,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: frontend/${{ matrix.mfe }}/package-lock.json
       
       - name: Install dependencies
         working-directory: ./frontend/${{ matrix.mfe }}
