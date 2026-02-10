@@ -12,11 +12,7 @@ This project uses GitHub Actions for continuous integration and deployment. The 
 - Pull requests to `main` or `develop` branches
 - Direct pushes to `main` or `develop` branches
 
-**NPM Caching**:
-- Uses `cache: 'npm'` to automatically cache node_modules
-- Auto-detects package-lock.json files in working directories
-- Significantly speeds up subsequent builds (2-5x faster)
-- Cache key based on package-lock.json hash (invalidates on dependency changes)
+**Note**: NPM caching is currently disabled because `package-lock.json` files don't exist yet. Once you run `npm install` in each directory and commit the lock files, you can re-enable caching by adding `cache: 'npm'` to the `setup-node` steps.
 
 **Jobs**:
 
@@ -294,16 +290,33 @@ Production deployments send Slack notifications to configured webhook:
 
 ### CI Pipeline Issues
 
-**Problem**: "Some specified paths were not resolved, unable to cache dependencies"
+**Problem**: "Dependencies lock file is not found" or cache-related errors
 
-**Solution**: This error occurs when `package-lock.json` doesn't exist. The workflow uses `cache: 'npm'` without specifying a path, which auto-detects lock files. If you see this error:
+**Solution**: The workflow currently has caching disabled. To enable faster builds, generate and commit `package-lock.json` files:
 ```bash
 # Generate package-lock.json files
 cd backend && npm install
 cd ../frontend/host-shell && npm install
-# Repeat for all MFEs
-git add */package-lock.json
-git commit -m "Add package-lock.json files"
+cd ../auth-mfe && npm install
+cd ../product-mfe && npm install
+cd ../cart-mfe && npm install
+cd ../order-mfe && npm install
+cd ../seller-mfe && npm install
+cd ../admin-mfe && npm install
+
+# Commit all lock files
+git add **/package-lock.json
+git commit -m "Add package-lock.json files for dependency caching"
+git push
+```
+
+Then update `.github/workflows/ci.yml` to re-enable caching:
+```yaml
+- name: Setup Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: ${{ env.NODE_VERSION }}
+    cache: 'npm'  # Add this line back
 ```
 
 **Problem**: Tests failing in CI but passing locally
