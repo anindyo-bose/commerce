@@ -1,0 +1,354 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '18.x'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      version: ${{ steps.set-version.outputs.version }}
+    
+    steps:
+      - name: Determine environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" =~ ^refs/tags/v ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Set version
+        id: set-version
+        run: |
+          if [[ "${{ github.ref }}" =~ ^refs/tags/ ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    needs: prepare
+    permissions:
+      contents: read
+      packages: write
+    
+    strategy:
+      matrix:
+        service: [backend, host-shell, auth-mfe, product-mfe, cart-mfe, order-mfe, seller-mfe, admin-mfe]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=${{ needs.prepare.outputs.environment }}-
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.environment == 'production' }}
+            type=raw,value=${{ needs.prepare.outputs.version }}
+      
+      - name: Determine build context
+        id: context
+        run: |
+          if [ "${{ matrix.service }}" = "backend" ]; then
+            echo "path=./backend" >> $GITHUB_OUTPUT
+          else
+            echo "path=./frontend/${{ matrix.service }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.context.outputs.path }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.service }}:buildcache,mode=max
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.commerce.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name commerce-staging-cluster --region us-east-1
+      
+      - name: Deploy backend to Kubernetes
+        run: |
+          kubectl set image deployment/commerce-backend \
+            commerce-backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ needs.prepare.outputs.version }} \
+            -n staging
+          kubectl rollout status deployment/commerce-backend -n staging --timeout=5m
+      
+      - name: Deploy frontend MFEs to Kubernetes
+        run: |
+          for mfe in host-shell auth-mfe product-mfe cart-mfe order-mfe seller-mfe admin-mfe; do
+            kubectl set image deployment/commerce-$mfe \
+              commerce-$mfe=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/$mfe:${{ needs.prepare.outputs.version }} \
+              -n staging
+            kubectl rollout status deployment/commerce-$mfe -n staging --timeout=5m
+          done
+      
+      - name: Run database migrations
+        run: |
+          kubectl run migration-${{ github.sha }} \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ needs.prepare.outputs.version }} \
+            --restart=Never \
+            --env="DATABASE_URL=${{ secrets.STAGING_DATABASE_URL }}" \
+            --command -- npm run migration:run
+          kubectl wait --for=condition=complete --timeout=5m job/migration-${{ github.sha }}
+      
+      - name: Verify deployment
+        run: |
+          kubectl get deployments -n staging
+          kubectl get pods -n staging
+      
+      - name: Run smoke tests
+        run: |
+          curl -f https://staging.commerce.example.com/health || exit 1
+          curl -f https://staging.commerce.example.com/api/v1/products || exit 1
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [prepare, build-and-push]
+    if: needs.prepare.outputs.environment == 'production'
+    environment:
+      name: production
+      url: https://commerce.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name commerce-production-cluster --region us-east-1
+      
+      - name: Create database backup
+        run: |
+          aws rds create-db-snapshot \
+            --db-instance-identifier commerce-production \
+            --db-snapshot-identifier pre-deploy-${{ github.sha }}-$(date +%Y%m%d-%H%M%S)
+      
+      - name: Run database migrations
+        run: |
+          kubectl run migration-${{ github.sha }} \
+            --image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ needs.prepare.outputs.version }} \
+            --restart=Never \
+            --env="DATABASE_URL=${{ secrets.PRODUCTION_DATABASE_URL }}" \
+            --command -- npm run migration:run
+          kubectl wait --for=condition=complete --timeout=5m job/migration-${{ github.sha }}
+      
+      - name: Deploy backend with rolling update
+        run: |
+          kubectl set image deployment/commerce-backend \
+            commerce-backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ needs.prepare.outputs.version }} \
+            -n production
+          kubectl rollout status deployment/commerce-backend -n production --timeout=10m
+      
+      - name: Deploy frontend MFEs with rolling update
+        run: |
+          for mfe in host-shell auth-mfe product-mfe cart-mfe order-mfe seller-mfe admin-mfe; do
+            kubectl set image deployment/commerce-$mfe \
+              commerce-$mfe=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/$mfe:${{ needs.prepare.outputs.version }} \
+              -n production
+            kubectl rollout status deployment/commerce-$mfe -n production --timeout=10m
+          done
+      
+      - name: Run smoke tests
+        run: |
+          curl -f https://commerce.example.com/health || exit 1
+          curl -f https://commerce.example.com/api/v1/products || exit 1
+      
+      - name: Verify deployment
+        run: |
+          kubectl get deployments -n production
+          kubectl get pods -n production
+      
+      - name: Run post-deployment tests
+        run: |
+          # Health checks
+          for i in {1..5}; do
+            curl -f https://commerce.example.com/health && break
+            sleep 10
+          done
+          
+          # API availability
+          curl -f https://commerce.example.com/api/v1/products
+          
+          # Frontend availability
+          curl -f https://commerce.example.com/
+      
+      - name: Notify deployment success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "✅ Production deployment successful",
+              attachments: [{
+                color: 'good',
+                fields: [{
+                  title: 'Version',
+                  value: '${{ needs.prepare.outputs.version }}',
+                  short: true
+                }, {
+                  title: 'Deployed by',
+                  value: '${{ github.actor }}',
+                  short: true
+                }, {
+                  title: 'Environment',
+                  value: 'Production',
+                  short: true
+                }, {
+                  title: 'Commit',
+                  value: '${{ github.sha }}',
+                  short: true
+                }]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    needs: [prepare, deploy-production]
+    if: failure() && needs.prepare.outputs.environment == 'production'
+    environment:
+      name: production
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name commerce-production-cluster --region us-east-1
+      
+      - name: Rollback backend deployment
+        run: |
+          kubectl rollout undo deployment/commerce-backend -n production
+          kubectl rollout status deployment/commerce-backend -n production --timeout=5m
+      
+      - name: Rollback frontend deployments
+        run: |
+          for mfe in host-shell auth-mfe product-mfe cart-mfe order-mfe seller-mfe admin-mfe; do
+            kubectl rollout undo deployment/commerce-$mfe -n production
+            kubectl rollout status deployment/commerce-$mfe -n production --timeout=5m
+          done
+      
+      - name: Notify rollback
+        uses: 8398a7/action-slack@v3
+        with:
+          status: custom
+          custom_payload: |
+            {
+              text: "⚠️ Production deployment failed - rollback initiated",
+              attachments: [{
+                color: 'danger',
+                fields: [{
+                  title: 'Failed Version',
+                  value: '${{ needs.prepare.outputs.version }}',
+                  short: true
+                }, {
+                  title: 'Deployed by',
+                  value: '${{ github.actor }}',
+                  short: true
+                }]
+              }]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
